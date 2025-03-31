@@ -70,22 +70,14 @@ const SEND_TO_STAFFS: &str = "s %";
 const SEND_TO_ADMINS: &str = "s _";
 const SOUND1: &[u8] = include_bytes!("sound1.mp3");
 const XPLDAN: &str = "XplDan";
-const SERVER_DOWN_500_ERR: &str = "500 Internal Server Error, server down";
 static mut SILENTKICK : bool = false;
-const SERVER_DOWN_ERR: &str = "502 Bad Gateway, server down";
-const KICKED_ERR: &str = "You have been kicked";
-const REG_ERR: &str = "This nickname is a registered member";
-const NICKNAME_ERR: &str = "Invalid nickname";
-const CAPTCHA_WG_ERR: &str = "Wrong Captcha";
-const CAPTCHA_USED_ERR: &str = "Captcha already used or timed out";
-const UNKNOWN_ERR: &str = "Unknown error";
+static mut AUTOTRANS: bool = false;
 const DNMX_URL: &str = "http://.onion";
 // const BHCLI_BLOG_URL: &str = "sss";
 
 
 
-lazy_static! {
-
+lazy_static! {    
     static ref MODE_ROOM: Mutex<String> = Mutex::new(String::new());
     static ref USER_AGENTS: Mutex<HashMap<String, String>> = Mutex::new(HashMap::new());
 
@@ -175,8 +167,7 @@ struct Opts {
     datetime_fmt: Option<String>,
     #[arg(long)]
     members_tag: Option<String>,
-    #[arg(short, long)]
-    dan: bool,
+
     #[arg(
         short,
         long,
@@ -199,9 +190,6 @@ struct Opts {
 
     #[arg(long)]
     session: Option<String>,
-
-    #[arg(long)]
-    sxiv: bool,
 }
 
 struct LeChatPHPConfig {
@@ -230,6 +218,11 @@ struct BaseClient {
     password: String,
 }
 
+#[allow(dead_code)]
+struct KickedUser {
+    name: String,
+    violation: String,
+}
 struct LeChatPHPClient {
     base_client: BaseClient,
     guest_color: String,
@@ -237,7 +230,6 @@ struct LeChatPHPClient {
     session: Option<String>,
     config: LeChatPHPConfig,
     last_key_event: Option<KeyCode>,
-    manual_captcha: bool,
     refresh_rate: u64,
     max_login_retry: isize,
 
@@ -318,7 +310,7 @@ impl LeChatPHPClient {
         // Use native dialog to select file
         if let Some(file_path) = rfd::FileDialog::new().pick_file() {
             // Open new terminal for input using xterm
-            if let Ok(output) = std::process::Command::new("xterm")
+            if let Ok(_) = std::process::Command::new("xterm")
                 .arg("-e")
                 .arg("bash") 
                 .arg("-c")
@@ -383,36 +375,18 @@ impl LeChatPHPClient {
     ) -> thread::JoinHandle<()> {
         let tx = self.tx.clone();
         thread::spawn(move || {
-            let mut last_update = Instant::now();
-            let mut bot_activated = false;
             loop {
                 let keep_msg = || {
                     let kicked_count = unsafe { KICKED_COUNT };
-                    // Kunci MODE_ROOM sekali saja
-                    let mode_room = MODE_ROOM.lock().unwrap();
-                    let mode_desc = match mode_room.as_str() {
-                        "1" => "all",
-                        "2" => "waiting",
-                        "3" => "staff",
-                        "4" => "members",
-                        _ => "unknown",
-                    };
                     let msg_keep = format!("
-                    [color=#ffffff]>>> H-E-L-L-O C-H-A-T-T-E-R-S W-E-L-C-O-M-E B-A-C-K TO BHC <<<[/color]
-                    Keep it legal and enjoy your stay. 
-                    You can try !-rules && ! help before. Please follow the !-rules
+                    !sb
                      [color=#00ff08]kicked users in the sesions chat -> {} <- [/color]
-                     Room Mode: {} - {}
                      (Auto message - keepalive message)
-                     ", kicked_count, mode_room.as_str(), mode_desc);
-                    tx.send(PostType::Upload("/home/whoami/Project/github/BHCLI-Tor/src/1564478315_13372.0.gif".to_string(), SEND_TO_ALL.to_string(), "Hey Hey All | keepalive".to_string())).unwrap();
+                     ", kicked_count);
+                    // tx.send(PostType::Upload("/home/whoami/Project/github/BHCLI-Tor/src/1564478315_13372.0.gif".to_string(), SEND_TO_ALL.to_string(), "Hey Hey All | keepalive".to_string())).unwrap();
                     tx.send(PostType::Post(msg_keep.to_owned(), Some(SEND_TO_ALL.to_owned()))).unwrap();
                 };
 
-                // Cek apakah members, staff dan admin kosong
-                let members_empty = MEMBERS.lock().unwrap().is_empty();
-                let staff_empty = STAFF.lock().unwrap().is_empty();
-                let admins_empty = ADMINS.lock().unwrap().is_empty();
                 let timeout = after(Duration::from_secs(60 * 75));
                                     // let timeout = after(Duration::from_secs(60));
 
@@ -627,7 +601,6 @@ impl LeChatPHPClient {
             &self.base_client.username,
             &self.base_client.password,
             &self.guest_color,
-            self.manual_captcha,
         )?);
         Ok(())
     }
@@ -652,8 +625,6 @@ impl LeChatPHPClient {
     }
 
     fn start_cycle(&self, color_only: bool) {
-        let username = self.base_client.username.clone();
-        let username = self.base_client.username.clone();
         let username = self.base_client.username.clone();
         let tx = self.tx.clone();
         let color_rx = Arc::clone(&self.color_rx);
@@ -1426,8 +1397,6 @@ fn handle_remove_name(&mut self, _app: &mut App) {
     fn handle_normal_mode_key_event_shift_u(&mut self, app: &mut App) {
         app.items.state.select(Some(0));
     }
-
-   
     fn handle_editing_mode_key_event_enter(&mut self, app: &mut App) -> Result<(), ExitSignal> {
         if FIND_RGX.is_match(&app.input) {
             return Ok(());
@@ -1438,27 +1407,21 @@ fn handle_remove_name(&mut self, _app: &mut App) {
 
         // Iterate over commands and execute associated actions
         for (command, action) in &app.commands.commands {
-            // log::error!("command :{} action :{}", command, action);
             let expected_input = format!("!{}", command);
             if input == expected_input {
-                // Execute the action by posting a message
                 self.post_msg(PostType::Post(action.clone(), None)).unwrap();
-                // Return Ok(()) if the action is executed successfully
                 return Ok(());
             }
         }
 
         if input == "/dl" {
-            // Delete last message
             self.post_msg(PostType::DeleteLast).unwrap();
         } else if let Some(captures) = DLX_RGX.captures(&input) {
-            // Delete the last X messages
             let x: usize = captures.get(1).unwrap().as_str().parse().unwrap();
             for _ in 0..x {
                 self.post_msg(PostType::DeleteLast).unwrap();
             }
         } else if input == "/dall" {
-            // Delete all messages
             self.post_msg(PostType::DeleteAll).unwrap();
         } else if input == "/cycles" {
             self.color_tx.send(()).unwrap();
@@ -1467,63 +1430,51 @@ fn handle_remove_name(&mut self, _app: &mut App) {
         } else if input == "/cycle2" {
             self.start_cycle(false);
         } else if input == "/kall" {
-            // Kick all guests
             let username = "s _".to_owned();
             let msg = "".to_owned();
             self.post_msg(PostType::Kick(msg, username)).unwrap();
         } else if input.starts_with("/m ") {
-            // Send message to "members" section
             let msg = remove_prefix(&input, "/m ").to_owned();
             let to = Some(SEND_TO_MEMBERS.to_owned());
             self.post_msg(PostType::Post(msg, to)).unwrap();
             app.input = "/m ".to_owned();
             app.input_idx = app.input.width()
         } else if input.starts_with("/a ") {
-            // Send message to "admin" section
             let msg = remove_prefix(&input, "/a ").to_owned();
             let to = Some(SEND_TO_ADMINS.to_owned());
             self.post_msg(PostType::Post(msg, to)).unwrap();
             app.input = "/a ".to_owned();
             app.input_idx = app.input.width()
         } else if input.starts_with("/s ") {
-            // Send message to "staff" section
             let msg = remove_prefix(&input, "/s ").to_owned();
             let to = Some(SEND_TO_STAFFS.to_owned());
             self.post_msg(PostType::Post(msg, to)).unwrap();
             app.input = "/s ".to_owned();
             app.input_idx = app.input.width()
         } else if let Some(captures) = PM_RGX.captures(&input) {
-            // Send PM message
             let username = &captures[1];
             let msg = captures[2].to_owned();
             let to = Some(username.to_owned());
-
             self.post_msg(PostType::Post(msg, to)).unwrap();
             app.input = format!("/pm {} ", username);
             app.input_idx = app.input.width()
         } else if let Some(captures) = NEW_NICKNAME_RGX.captures(&input) {
-            // Change nickname
             let new_nickname = captures[1].to_owned();
             self.post_msg(PostType::NewNickname(new_nickname)).unwrap();
         } else if let Some(captures) = NEW_COLOR_RGX.captures(&input) {
-            // Change color
             let new_color = captures[1].to_owned();
             self.post_msg(PostType::NewColor(new_color)).unwrap();
         } else if let Some(captures) = KICK_RGX.captures(&input) {
-            // Kick a user
             let username = captures[1].to_owned();
             let msg = captures[2].to_owned();
             self.post_msg(PostType::Kick(msg, username)).unwrap();
         } else if let Some(captures) = IGNORE_RGX.captures(&input) {
-            // Ignore a user
             let username = captures[1].to_owned();
             self.post_msg(PostType::Ignore(username)).unwrap();
         } else if let Some(captures) = UNIGNORE_RGX.captures(&input) {
-            // Unignore a user
             let username = captures[1].to_owned();
             self.post_msg(PostType::Unignore(username)).unwrap();
         } else if let Some(captures) = UPLOAD_RGX.captures(&input) {
-            // Upload a file
             let file_path = captures[1].to_owned();
             let send_to = match captures.get(2) {
                 Some(to_match) => match to_match.as_str() {
@@ -1533,22 +1484,19 @@ fn handle_remove_name(&mut self, _app: &mut App) {
                     _ => SEND_TO_ALL,
                 },
                 None => SEND_TO_ALL,
-            }
-            .to_owned();
+            }.to_owned();
             let msg = match captures.get(3) {
                 Some(msg_match) => msg_match.as_str().to_owned(),
                 None => "".to_owned(),
             };
-            self.post_msg(PostType::Upload(file_path, send_to, msg))
-                .unwrap();
+            self.post_msg(PostType::Upload(file_path, send_to, msg)).unwrap();
         } else if input.starts_with("/clean ") {
             let username = remove_prefix(&input, "/clean ").to_owned();
             self.post_msg(PostType::HapusPesan(username.clone())).unwrap();
-            
-        }else if input.starts_with("/logout ") {
+        } else if input.starts_with("/logout ") {
             let username = remove_prefix(&input, "/logout ").to_owned();
             self.post_msg(PostType::SilentBan(username.clone())).unwrap();
-        }else if input.starts_with("/mode ") {
+        } else if input.starts_with("/mode ") {
             let mode_str = remove_prefix(&input, "/mode ");
             let mode = match mode_str {
                 "all" => "1",
@@ -1558,16 +1506,15 @@ fn handle_remove_name(&mut self, _app: &mut App) {
                 _ => mode_str
             };
             let mut mode_room = MODE_ROOM.lock().unwrap();
-            // Convert the mode string to a char before pushing
             if let Some(mode_char) = mode.chars().next() {
                 mode_room.push(mode_char);
             }
             self.post_msg(PostType::ModeRoom(mode.to_owned())).unwrap();
             let mode_desc = match mode {
                 "1" => "all",
-                "2" => "waiting", 
+                "2" => "waiting",
                 "3" => "staff",
-                "4" => "members",
+                "4" => "members", 
                 _ => "unknown"
             };
             let msg = format!("Mode room changed to {} ({})", mode_desc, mode);
@@ -1577,12 +1524,26 @@ fn handle_remove_name(&mut self, _app: &mut App) {
             self.post_msg(PostType::Unban(username.clone())).unwrap();
         } else if input.starts_with("/selfout") {
             self.post_msg(PostType::Keluar).unwrap();
+        } else if input.starts_with("/tr ") {
+            let tr_cmd = remove_prefix(&input, "/tr ").trim();
+            match tr_cmd {
+                "on" => {
+                    unsafe { AUTOTRANS = true };
+                },
+                "off" => {
+                    unsafe { AUTOTRANS = false };
+                },
+                _ => {
+                    app.input_idx = input.len();
+                    app.input = input;
+                    app.input_mode = InputMode::EditingErr;
+                }
+            }
         }else if input.starts_with("/") && !input.starts_with("/me ") {
             app.input_idx = input.len();
             app.input = input;
             app.input_mode = InputMode::EditingErr;
-        }  else {
-            // Send normal message
+        } else {
             self.post_msg(PostType::Post(input, None)).unwrap();
         }
         Ok(())
@@ -2001,11 +1962,23 @@ fn post_msg(
             }
             PostType::Post(msg, send_to) => {
                 should_reset_keepalive_timer = true;
+                let message = if unsafe { AUTOTRANS == true } {
+                    match translate_id_to_en(&msg) {
+                        Ok(translated) => translated,
+                        Err(_) => {
+                            log::warn!("Gagal menerjemahkan pesan, menggunakan pesan asli");
+                            msg
+                        }
+                    }
+                } else {
+                    msg
+                };
+                
                 params.extend(vec![
                     ("action", "post".to_owned()),
                     ("postid", postid_value.to_owned()),
                     ("multi", "on".to_owned()),
-                    ("message", msg),
+                    ("message", message),
                     ("sendto", send_to.unwrap_or(SEND_TO_ALL.to_owned())),
                 ]);
             }
@@ -2050,14 +2023,6 @@ fn post_msg(
                     ("newnickname", new_nickname),
                 ]);
             }
-            PostType::Incoon(incognito) => {
-                set_profile_base_info(client, full_url, &mut params)?;
-                params.extend(vec![
-                    ("do", "save".to_owned()),
-                    ("timestamps", "on".to_owned()),
-                    ("incognito", "on".to_owned()),
-                ]);
-            }
             PostType::Kick(msg, send_to) => {
                 params.extend(vec![
                     ("action", "post".to_owned()),
@@ -2087,9 +2052,13 @@ fn post_msg(
                 let mut user_agents = HashMap::new();
                 let mut blocked_users = Vec::new();
 
-                // List of blocked user agents
+                // List of blocked user agentss
                 let blocked_agents = vec![
-                    "Mozilla/5.0 (iPhone; CPU iPhone OS 16_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Mobile/15E148 Safari/604.1"
+                    // "Mozilla/5.0 (iPhone; CPU iPhone OS 16_3_1 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Mobile/15E148 Safari/604.1",
+                    // "Mozilla/5.0 (iPhone; CPU iPhone OS 18_0 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Mobile/22A3351", 
+                    "Mozilla/5.0 (Windows NT 6.3; Win64, x64; Trident/7.0; rv:11.0) like Gecko",
+                    // "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_12_6) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/11.1 Safari/605.1.15",
+                    // "Mozilla/5.0 (Macintosh; Intel Mac OS X 13_2_1) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/16.3 Safari/605.1.15"
                 ];
 
                 // Store all users and their user agents first
@@ -2111,7 +2080,7 @@ fn post_msg(
                             // Store all users and their agents
                             user_agents.insert(nickname.clone(), user_agent.clone());
 
-                            // Check if user agent is in blocked list and user is guest
+                            // Check if user agent is in blocked list or too short (< 10 chars)
                             let is_guest = !{
                                 let previous = PREVIOUS_MEMBERS.lock().unwrap();
                                 if let Some(members) = &*previous {
@@ -2121,7 +2090,9 @@ fn post_msg(
                                 }
                             };
 
-                            if is_guest && blocked_agents.iter().any(|blocked| user_agent.contains(blocked)) {
+                            if is_guest && (
+                                blocked_agents.iter().any(|blocked| user_agent.contains(blocked) || user_agent.len() < 10) 
+                            ) {
                                 blocked_users.push(nickname);
                             }
                         }
@@ -2137,7 +2108,7 @@ fn post_msg(
                     kick_params.extend(vec![
                         ("action", "post".to_owned()),
                         ("postid", postid_value.to_owned()),
-                        ("message", format!("Blocked IP detected: {}", username)),
+                        ("message", format!("Blocked/Invalid session server detected: {}", username)),
                         ("sendto", username.to_owned()),
                         ("kick", "kick".to_owned()),
                         ("what", "purge".to_owned()),
@@ -2152,7 +2123,8 @@ fn post_msg(
                 let mut formatted_agents = String::new();
                 for (nickname, agent) in user_agents.iter() {
                     if blocked_users.contains(nickname) {
-                        formatted_agents.push_str(&format!("\nBLOCKED - {} : {}\n", nickname, agent));
+                        formatted_agents.push_str(&format!("\nBLOCKED - {} : {} (Length: {})\n", 
+                            nickname, agent, agent.len()));
                     }
                 }
 
@@ -2228,7 +2200,39 @@ fn parse_date(date: &str, datetime_fmt: &str) -> Option<NaiveDateTime> {
         })
         .ok()
 }
+fn translate_id_to_en(text: &str) -> anyhow::Result<String> {
+    let client = reqwest::blocking::Client::new();
+    let url = format!("https://generativelanguage.googleapis.com/v1beta/models/learnlm-1.5-pro-experimental:generateContent?key={}", API_KEY);
 
+    let body = json!({
+        "contents": [{
+            "role": "user", 
+            "parts": [{
+                "text": format!("Translate this text and fix any grammar issues.  Do not translate usernames after @. Do not mention source or target languages: {}", text)
+            }]
+        }],
+        "generationConfig": {
+            "temperature": 0.7,
+            "topP": 1,
+            "topK": 1,
+            "maxOutputTokens": 1024
+        }
+    });
+
+    let response = client
+        .post(&url)
+        .json(&body)
+        .send()?
+        .json::<serde_json::Value>()?;
+
+    let translated = response["candidates"][0]["content"]["parts"][0]["text"]
+        .as_str()
+        .ok_or_else(|| anyhow::anyhow!("Failed to process response"))?
+        .trim()
+        .to_string();
+
+    Ok(translated)
+}
 
 fn get_msgs(
     client: &Client,
@@ -2347,8 +2351,6 @@ fn process_new_messages(
                         "cleaninbox!" => cleaninbox(tx, &from),
                         "readinbox!" => readinbox(tx, &from),
                         "shadowleftdan!" => shadowleft(tx, &from),
-                        "incoff!" => disable_incognito(tx, &from),
-                        "incoon!" => enable_incognito(tx, &from),
                         _ => (),
                     }
                 } else if msg == "danhelp!" {
@@ -2386,21 +2388,6 @@ fn update_data(users: &Users, tx: &crossbeam_channel::Sender<PostType>) {
     }
 }
 
-fn enable_incognito(tx: &crossbeam_channel::Sender<PostType>, from: &str) {
-    let message = format!("Hello @{}, Incognito mode has been enabled", from);
-    tx.send(PostType::Post(message, Some("0".to_owned()))).unwrap();
-    
-    // Send profile update to enable incognito
-    tx.send(PostType::Incoon(from.to_owned())).unwrap();
-}
-
-fn disable_incognito(tx: &crossbeam_channel::Sender<PostType>, from: &str) {
-    let message = format!("Hello @{}, Incognito mode has been disabled", from);
-    tx.send(PostType::Post(message, Some("0".to_owned()))).unwrap();
-    
-    // Send profile update to disable incognito
-    tx.send(PostType::Profile("incognito=off".to_owned(), from.to_owned())).unwrap();
-}
 
 
 
@@ -2619,12 +2606,7 @@ async fn send_request(client: &reqwest::Client, url: &str, body: &serde_json::Va
 // }
 
 // loot data anjing sulit bet dah
-    struct KickedUser {
-        name: String,
-        violation: String,
-    }
-    
-
+  
 // fungsi untuk melakukan kicked user di processe message
     fn report_dantca(tx: &crossbeam_channel::Sender<PostType>, from: &str) {
         let user_agents = USER_AGENTS.lock().unwrap();
@@ -2650,7 +2632,7 @@ async fn send_request(client: &reqwest::Client, url: &str, body: &serde_json::Va
         kicked_users.push(KickedUser { name, violation });
     }
 
-    fn dantca_help(tx: &crossbeam_channel::Sender<PostType>, from: &str) {
+fn dantca_help(tx: &crossbeam_channel::Sender<PostType>, from: &str) {
         let help_message = format!("
     [color=#ffffff]Hallo @{}, there is guide for Dantca bot[/color]
     [color=#00FF00]dantcago![/color] = Active Dantca Bot
@@ -2677,7 +2659,8 @@ fn dantca_guest_proses(from: &str, tx: &crossbeam_channel::Sender<PostType>) {
     without (-)
     ", from);
     tx.send(PostType::Post(msg_help, Some(SEND_TO_ALL.to_owned()))).unwrap();  
-    }
+
+}
 
 // Fungsi untuk mengatur BOT_ACTIVE dan REMOVE_NAME
 
@@ -3316,8 +3299,6 @@ fn ban_imposters(tx: &crossbeam_channel::Sender<PostType>, users: &Users) {
     if !bot_active && !remove_name {
         return;
     }
-
-
     let banned_patterns = [
         (Regex::new(r"(?i)n[o0]tr[1il][vy]").unwrap(), "n0tr1v"),
         (Regex::new(r"(?i)h[i1]t[l1]er").unwrap(), "hitler"),
@@ -3356,9 +3337,13 @@ fn ban_imposters(tx: &crossbeam_channel::Sender<PostType>, users: &Users) {
         if kicked_words.iter().any(|&word| lower_name.contains(word)) || xpldan_patterns.is_match(&lower_name) {
             let msg = format!("Do not use names on the blacklist '{}'. ~Dantca bot", lower_name);
             tx.send(PostType::Kick(msg, username.to_owned())).unwrap();
-
-            // cek kata kata
         }
+
+        if lower_name.contains("charon") {
+            let msg = format!(" ~Dantca bot im the controling exit node ");
+            tx.send(PostType::Kick(msg, username.to_owned())).unwrap();
+        }
+
         if lower_name == XPLDAN {
             let msg = format!("Dont to be me LOL, Dantca can See You lol.. ~dantca Bot.. dont used again = {} = ",lower_name);
             tx.send(PostType::Kick(msg, username.to_owned())).unwrap();
@@ -3492,7 +3477,6 @@ fn new_default_le_chat_php_client(params: Params) -> LeChatPHPClient {
         session,
         last_key_event: None,
         client: params.client,
-        manual_captcha: params.manual_captcha,
         refresh_rate: params.refresh_rate,
         config: LeChatPHPConfig::new_black_hat_chat_config(),
         is_muted: Arc::new(Mutex::new(false)),
@@ -3521,7 +3505,6 @@ struct Params {
     password: String,
     guest_color: String,
     client: Client,
-    manual_captcha: bool,
     refresh_rate: u64,
     max_login_retry: isize,
     keepalive_send_to: Option<String>,
@@ -3605,7 +3588,7 @@ fn get_guest_color(wanted: Option<String>) -> String {
 }
 
 fn get_tor_client(socks_proxy_url: &str, no_proxy: bool) -> Client {
-    let ua = "im ghost no one know who am i??";
+    let ua = "im ghost no one know, who am i?? the ghost";
     let mut builder = reqwest::blocking::ClientBuilder::new()
         .redirect(Policy::none())
         .cookie_store(true)
@@ -3763,7 +3746,6 @@ fn main() -> anyhow::Result<()> {
         password,
         guest_color,
         client: client.clone(),
-        manual_captcha: opts.manual_captcha,
         refresh_rate: opts.refresh_rate,
         max_login_retry: opts.max_login_retry,
         keepalive_send_to: opts.keepalive_send_to,
@@ -3783,7 +3765,6 @@ enum PostType {
     ModeRoom(String),
     HapusPesan(String),
     SilentBan(String),
-    Incoon(String),              // Incognito
     Post(String, Option<String>),   // Message, SendTo
     Kick(String, String),           // Message, Username
     Upload(String, String, String), // FileLocation, SendTo, Message
@@ -4378,7 +4359,8 @@ fn render_help_txt(f: &mut Frame<CrosstermBackend<io::Stdout>>, app: &mut App, r
     msg.extend(vec![Span::raw(" | "), Span::styled(bot_text, bot_style)]);
     let (remove_name_text, remove_name_style) = unsafe { if REMOVE_NAME { ("Remove Name", Style::default().fg(tuiColor::LightGreen).add_modifier(Modifier::BOLD)) } else { ("Remove Name", Style::default().fg(tuiColor::Red)) } };
     msg.extend(vec![Span::raw(" | "), Span::styled(remove_name_text, remove_name_style)]);
-    
+    let (autotrans_text, autotrans_style) = unsafe { if AUTOTRANS { ("Auto translate", Style::default().fg(tuiColor::LightGreen).add_modifier(Modifier::BOLD)) } else { ("Auto translate", Style::default().fg(tuiColor::Red)) } };
+    msg.extend(vec![Span::raw(" | "), Span::styled(autotrans_text, autotrans_style)]);  
     // Menampilkan jumlah pesan di inbox
     let inbox_count = unsafe { INBOX_COUNT };
     let inbox_text = format!("Inbox: {}", inbox_count);
@@ -4777,6 +4759,7 @@ impl Events {
             },
         }
     }
+
 }
 
 #[cfg(test)]
